@@ -15,4 +15,5 @@ static/uploads/*
 static/temp/*
 !static/uploads/.gitkeep
 !static/temp/.gitkeep
-tests/
+tests/testing.py
+tests/edy.py
