@@ -1,6 +1,6 @@
 """
-GlamAI - Azure AI Search Service (Fixed)
-Fix for array field handling
+GlamAI - Azure AI Search Service (Complete Fixed Version)
+Proper indentation and array handling
 """
 
 from azure.search.documents import SearchClient
@@ -31,63 +31,80 @@ class SearchService:
         self._ensure_index_exists()
 
     def _ensure_index_exists(self):
-        """Ensures that the Azure Search index exists with correct fields"""
+        """Force recreate Azure Search index with correct field types."""
         try:
-            existing_indexes = [i.name for i in self.index_client.list_indexes()]
-            
-            if self.index_name not in existing_indexes:
-                logger.info(f"🔧 Creating new Azure Search index: {self.index_name}")
-                fields = [
-                    SimpleField(name="id", type=SearchFieldDataType.String, key=True),
-                    SearchableField(name="brand", type=SearchFieldDataType.String, sortable=True, filterable=True),
-                    SearchableField(name="product_name", type=SearchFieldDataType.String, sortable=True),
-                    SearchableField(name="category", type=SearchFieldDataType.String, sortable=True, filterable=True),
-                    SearchableField(name="shade", type=SearchFieldDataType.String, filterable=True),
-                    SimpleField(name="price", type=SearchFieldDataType.Double, sortable=True, filterable=True),
-                    SimpleField(name="average_rating", type=SearchFieldDataType.Double, sortable=True, filterable=True),
-                    SimpleField(name="total_reviews", type=SearchFieldDataType.Int32, sortable=True, filterable=True),
-                    SimpleField(name="in_stock", type=SearchFieldDataType.Boolean, filterable=True),
-                    # CRITICAL: Collection fields must be SearchableField with Collection type
-                    SearchableField(
-                        name="tags",
-                        type=SearchFieldDataType.Collection(SearchFieldDataType.String),
-                        filterable=True
-                    ),
-                    SearchableField(
-                        name="ingredients",
-                        type=SearchFieldDataType.Collection(SearchFieldDataType.String),
-                        filterable=True
-                    ),
-                    SimpleField(name="image_url", type=SearchFieldDataType.String),
-                    SimpleField(name="product_url", type=SearchFieldDataType.String),
-                ]
-                index = SearchIndex(name=self.index_name, fields=fields)
-                self.index_client.create_index(index)
-                logger.info("✅ Azure Search index created successfully")
-            else:
-                logger.info(f"✅ Azure Search index '{self.index_name}' already exists")
+            logger.info(f"🔧 Recreating Azure Search index: {self.index_name}")
+            print("🔍 Using endpoint:", self.endpoint)
+            print("🔍 Index name:", self.index_name)
+
+            # Always delete first to ensure schema consistency
+            try:
+                self.index_client.delete_index(self.index_name)
+                logger.info(f"🗑️ Deleted existing index '{self.index_name}'")
+            except Exception as e:
+                logger.warning(f"ℹ️ No existing index to delete or already removed: {e}")
+
+            # ✅ Define field schema explicitly
+            from azure.search.documents.indexes.models import SearchField
+
+            fields = [
+                SimpleField(name="id", type=SearchFieldDataType.String, key=True),
+                SearchableField(name="brand", type=SearchFieldDataType.String, sortable=True, filterable=True),
+                SearchableField(name="product_name", type=SearchFieldDataType.String, sortable=True),
+                SearchableField(name="category", type=SearchFieldDataType.String, sortable=True, filterable=True),
+                SearchableField(name="shade", type=SearchFieldDataType.String, filterable=True),
+                SimpleField(name="price", type=SearchFieldDataType.Double, sortable=True, filterable=True),
+                SimpleField(name="average_rating", type=SearchFieldDataType.Double, sortable=True, filterable=True),
+                SimpleField(name="total_reviews", type=SearchFieldDataType.Int32, sortable=True, filterable=True),
+                SimpleField(name="in_stock", type=SearchFieldDataType.Boolean, filterable=True),
+                SimpleField(name="image_url", type=SearchFieldDataType.String),
+                SimpleField(name="product_url", type=SearchFieldDataType.String),
+
+                # ✅ Explicitly define collection fields (string form avoids SDK type loss)
+                SearchField(name="tags", type="Collection(Edm.String)", searchable=True, filterable=True),
+                SearchField(name="ingredients", type="Collection(Edm.String)", searchable=True, filterable=True),
+            ]
+
+            # Create new index
+            index = SearchIndex(name=self.index_name, fields=fields)
+            self.index_client.create_index(index)
+            logger.info(f"✅ Azure Search index '{self.index_name}' created successfully with {len(fields)} fields")
+
+            # Verify schema after creation
+            created_index = self.index_client.get_index(self.index_name)
+            for f in created_index.fields:
+                print(f"{f.name} → {f.type}")
+
         except Exception as e:
             logger.error(f"❌ Error ensuring Azure Search index: {e}")
+            logger.exception("❌ Full traceback for Azure Search index creation failure:")
+
+
 
     async def upload_products(self, products: list[dict]):
         """
         Upload or merge product data into Azure Search.
-        Properly handles Collection fields (ingredients, tags).
+        Properly handles Collection fields and empty arrays.
         """
         try:
             clean_products = []
             
             for p in products:
-                # Ensure ingredients and tags are lists
+                # Get ingredients and tags
                 ingredients = p.get("ingredients", [])
+                tags = p.get("tags", [])
+                
+                # Ensure they are lists
                 if not isinstance(ingredients, list):
                     ingredients = [ingredients] if ingredients else []
-                
-                tags = p.get("tags", [])
                 if not isinstance(tags, list):
                     tags = [tags] if tags else []
                 
-                # Clean the product document
+                # Filter out empty/None values and ensure strings
+                ingredients = [str(i).strip() for i in ingredients if i and str(i).strip()]
+                tags = [str(t).strip() for t in tags if t and str(t).strip()]
+                
+                # Build clean document
                 clean_doc = {
                     "id": str(p.get("id", "")),
                     "brand": str(p.get("brand") or ""),
@@ -98,17 +115,25 @@ class SearchService:
                     "average_rating": float(p.get("average_rating") or 0.0),
                     "total_reviews": int(p.get("total_reviews") or 0),
                     "in_stock": bool(p.get("in_stock", True)),
-                    # Ensure collections are lists of strings
-                    "tags": [str(t) for t in tags if t],
-                    "ingredients": [str(i) for i in ingredients if i],
                     "image_url": str(p.get("image_url") or ""),
                     "product_url": str(p.get("product_url") or ""),
                 }
                 
+                # CRITICAL FIX: Add placeholders for empty collections
+                if ingredients:
+                    clean_doc["ingredients"] = ingredients
+                else:
+                    clean_doc["ingredients"] = ["Not specified"]
+                
+                if tags:
+                    clean_doc["tags"] = tags
+                else:
+                    clean_doc["tags"] = ["Untagged"]
+                
                 clean_products.append(clean_doc)
-                logger.info(f"📦 Prepared document for indexing: {clean_doc['product_name']}")
-                logger.info(f"   - Tags: {len(clean_doc['tags'])} items")
-                logger.info(f"   - Ingredients: {len(clean_doc['ingredients'])} items")
+                logger.info(f"📦 Prepared: {clean_doc['product_name'][:50]}")
+                logger.info(f"   - Ingredients: {len(clean_doc.get('ingredients', []))} items")
+                logger.info(f"   - Tags: {len(clean_doc.get('tags', []))} items")
 
             # Upload to Azure Search
             result = self.search_client.upload_documents(documents=clean_products)
@@ -117,7 +142,7 @@ class SearchService:
             success_count = sum(1 for r in result if r.succeeded)
             failed_count = len(result) - success_count
             
-            logger.info(f"✅ Uploaded {success_count} products to Azure Search")
+            logger.info(f"✅ Uploaded {success_count}/{len(result)} products to Azure Search")
             
             if failed_count > 0:
                 logger.warning(f"⚠️ {failed_count} products failed to upload")
@@ -130,11 +155,8 @@ class SearchService:
             logger.error(f"   Products attempted: {len(products)}")
             if products:
                 logger.error(f"   First product sample: {products[0]}")
-            raise
+            # Don't raise - allow product to be saved even if search indexing fails
 
-    # ======================================================
-    # 🧠 Hybrid Product Search
-    # ======================================================
     async def search_products(
         self,
         category: Optional[str] = None,
@@ -182,9 +204,6 @@ class SearchService:
             logger.error(f"❌ Product search error: {str(e)}")
             return []
 
-    # ======================================================
-    # 🧴 AI Safety Enrichment
-    # ======================================================
     async def _enrich_with_safety(
         self,
         products: List[Dict[str, Any]],
@@ -228,9 +247,6 @@ class SearchService:
 
         return products
 
-    # ======================================================
-    # 💰 Smart Product Substitutes
-    # ======================================================
     async def find_product_substitutes(
         self,
         category: str,
@@ -246,9 +262,6 @@ class SearchService:
             top=5
         )
 
-    # ======================================================
-    # 🔥 Trending Products
-    # ======================================================
     async def get_trending_products(
         self,
         category: Optional[str] = None,

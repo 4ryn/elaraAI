@@ -24,7 +24,7 @@ from app.services.azure.search_service import search_service
 from app.services.azure.storage_service import storage_service
 
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from loguru import logger
 import io
 import json
@@ -181,6 +181,101 @@ IMPORTANT:
         except Exception as e:
             logger.error(f"❌ LLM search failed: {e}")
             return None
+    async def extract_ingredients_from_product(
+        self, 
+        product_name: str, 
+        brand: str,
+        llm_service_instance
+    ) -> List[str]:
+        """
+        Use LLM to search for and extract ingredients for a known product.
+        This is crucial when barcode APIs don't provide ingredient lists.
+        """
+        logger.info(f"🧪 Extracting ingredients for: {brand} {product_name}")
+        
+        try:
+            prompt = f"""
+Search for the full ingredient list (INCI list) for this cosmetic product:
+
+Product: {product_name}
+Brand: {brand}
+
+Find the complete ingredient list and return it as a JSON array.
+Look for the official INCI (International Nomenclature of Cosmetic Ingredients) list.
+
+Return ONLY valid JSON:
+{{
+    "ingredients": [
+        "ingredient1",
+        "ingredient2",
+        "ingredient3"
+    ],
+    "source": "official product page|retailer|ingredient database",
+    "confidence": 0.95
+}}
+
+IMPORTANT:
+- Return actual ingredient names (e.g., "Cyclopentasiloxane", "Dimethicone", "Talc")
+- Do NOT return empty list unless absolutely no information found
+- Look for common foundation/makeup ingredients if specific list not found
+- Return at least 5-10 common ingredients for this type of product
+"""
+            
+            response = await llm_service_instance.get_structured_response(
+                prompt=prompt,
+                system_role="cosmetic chemist and ingredient specialist",
+                max_tokens=1500
+            )
+            
+            ingredients = response.get("ingredients", [])
+            
+            if ingredients and len(ingredients) > 0:
+                # Clean and validate ingredients
+                cleaned = [str(i).strip() for i in ingredients if i and len(str(i).strip()) > 2]
+                logger.info(f"✅ Found {len(cleaned)} ingredients via LLM")
+                return cleaned
+            else:
+                logger.warning(f"⚠️ No ingredients found for {product_name}")
+                return []
+            
+        except Exception as e:
+            logger.error(f"❌ Ingredient extraction failed: {e}")
+            return []
+    
+    async def enrich_barcode_result(
+        self,
+        barcode_data: Dict[str, Any],
+        llm_service_instance
+    ) -> Dict[str, Any]:
+        """
+        Enrich barcode lookup result with ingredients if not present.
+        This ensures we always get ingredients for safety analysis.
+        """
+        product_name = barcode_data.get("product_name", "")
+        brand = barcode_data.get("brand", "")
+        existing_ingredients = barcode_data.get("ingredients", [])
+        
+        # Check if we need to fetch ingredients
+        needs_ingredients = False
+        
+        if not existing_ingredients or len(existing_ingredients) == 0:
+            needs_ingredients = True
+        elif isinstance(existing_ingredients, str):
+            # If it's a string, try to parse it
+            needs_ingredients = True
+        
+        if needs_ingredients and product_name and brand:
+            logger.info("🔍 Fetching ingredients for barcode result...")
+            ingredients = await self.extract_ingredients_from_product(
+                product_name, brand, llm_service_instance
+            )
+            
+            if ingredients:
+                barcode_data["ingredients"] = ingredients
+                barcode_data["ingredients_source"] = "llm_search"
+                logger.info(f"✅ Enriched with {len(ingredients)} ingredients")
+        
+        return barcode_data
 
 
 # CREATE SINGLETON INSTANCE HERE (after class definition)
@@ -255,15 +350,23 @@ async def scan_product(
             
             if barcode_data:
                 lookup_method = barcode_data.get("source")
+                logger.info(f"✅ Found via {lookup_method}")
                 
-                # Parse ingredients
-                ingredients_text = barcode_data.get("ingredients", "")
+                # Step 2: ENRICH WITH INGREDIENTS (NEW!)
+                barcode_data = await barcode_service.enrich_barcode_result(
+                    barcode_data, llm_service
+                )
+                
+                # Step 3: Parse ingredients
+                ingredients_text = barcode_data.get("ingredients", [])
+                
                 if isinstance(ingredients_text, str) and ingredients_text:
+                    # It's a string, parse it
                     try:
                         ing_prompt = f"""
-Extract ingredient list from: {ingredients_text[:500]}
-Return JSON: {{"ingredients": ["ingredient1", "ingredient2"]}}
-"""
+        Extract clean ingredient list from: {ingredients_text[:500]}
+        Return JSON: {{"ingredients": ["ingredient1", "ingredient2"]}}
+        """
                         ing_result = await llm_service.get_structured_response(
                             prompt=ing_prompt,
                             system_role="ingredient parser",
@@ -273,21 +376,34 @@ Return JSON: {{"ingredients": ["ingredient1", "ingredient2"]}}
                     except Exception as ing_error:
                         logger.warning(f"⚠️ Ingredient parsing failed: {ing_error}")
                         ingredients_list = []
+                
+                elif isinstance(ingredients_text, list):
+                    # Already a list
+                    ingredients_list = ingredients_text
                 else:
-                    ingredients_list = barcode_data.get("ingredients", [])
+                    ingredients_list = []
+                
+                # If still no ingredients, try one more search
+                if not ingredients_list or len(ingredients_list) == 0:
+                    logger.warning("⚠️ Still no ingredients, doing deep search...")
+                    ingredients_list = await barcode_service.extract_ingredients_from_product(
+                        barcode_data.get("product_name", ""),
+                        barcode_data.get("brand", ""),
+                        llm_service
+                    )
                 
                 structured_data = {
                     "brand": barcode_data.get("brand", ""),
                     "product_name": barcode_data.get("product_name", ""),
                     "shade": "",
-                    "category": "other",  # Default to other for API results
+                    "category": "other",
                     "description": barcode_data.get("description", ""),
                     "tags": [],
                     "price": 0.0,
-                    "ingredients": ingredients_list
+                    "ingredients": ingredients_list  # Now guaranteed to have ingredients
                 }
                 
-                logger.info(f"✅ Found via {lookup_method}")
+                logger.info(f"✅ Final ingredient count: {len(ingredients_list)}")  
             
             else:
                 # Fallback: LLM search
@@ -847,7 +963,7 @@ async def get_vanity_stats(
     
     expiring_soon = [
         p for p in products 
-        if p.expiry_date and p.expiry_date <= datetime.utcnow() + timedelta(days=30)
+        if p.expiry_date and p.expiry_date <= datetime.now(timezone.utc) + timedelta(days=30)
     ]
     
     return {

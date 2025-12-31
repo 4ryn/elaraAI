@@ -3,12 +3,15 @@ GlamAI - Makeup Session Models
 Models for makeup sessions, plans, and history
 """
 
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Enum, ForeignKey, Text, JSON
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Enum, ForeignKey, Text, JSON, Time
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.database import Base
 from app.models.user import UserStyleSession
+from datetime import time, datetime,date
 import enum
+from typing import List, Dict, Any
+
 
 
 class OccasionType(str, enum.Enum):
@@ -126,45 +129,37 @@ class MakeupSession(Base):
 class ScheduledEvent(Base):
     """Scheduled makeup events with calendar integration"""
     __tablename__ = "scheduled_events"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    
-    # Event Details
-    event_name = Column(String(500), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    event_name = Column(String(200), nullable=False)
     event_date = Column(DateTime(timezone=True), nullable=False)
-    event_time = Column(String(10), nullable=True)  # "7:00 PM"
-    occasion = Column(Enum(OccasionType), nullable=False)
     
-    # Outfit Planning
+    event_time = Column(Time, nullable=True)
+    
+    # ✅ FIXED: Match database ENUM type
+    occasion = Column(Enum(OccasionType, name="occasiontype"), nullable=False)
+    
     outfit_description = Column(Text, nullable=True)
-    # outfit_image_url = Column(String(500), nullable=True)
-    
-    # Reminders
     remind_1_day_before = Column(Boolean, default=True)
     remind_2_hours_before = Column(Boolean, default=True)
     skincare_reminder_sent = Column(Boolean, default=False)
     makeup_reminder_sent = Column(Boolean, default=False)
-    
-    # Linked Session
+
     makeup_session_id = Column(Integer, ForeignKey("makeup_sessions.id"), nullable=True)
     session_completed = Column(Boolean, default=False)
-    
-    # Status
     is_active = Column(Boolean, default=True)
     is_cancelled = Column(Boolean, default=False)
-    
-    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     style_session_id = Column(Integer, ForeignKey("user_style_sessions.id"), nullable=True)
 
-    
-    # Relationships
     user = relationship("User", back_populates="events")
-    
+
     def __repr__(self):
-        return f"<ScheduledEvent {self.event_name}>"
+        return f"<ScheduledEvent id={self.id} occasion={self.occasion.value}>"
+
+        
 
 
 class MakeupHistory(Base):
@@ -193,9 +188,5 @@ class MakeupHistory(Base):
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    
-
-    
     def __repr__(self):
         return f"<MakeupHistory {self.look_name}>"

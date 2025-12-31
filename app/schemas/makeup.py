@@ -2,10 +2,12 @@
 GlamAI - Makeup Session Schemas
 """
 
-from pydantic import BaseModel, Field, HttpUrl
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+from pydantic import BaseModel, Field, HttpUrl,field_validator
+from typing import Optional, List, Dict, Any,Union
 from app.models.makeup import OccasionType, MakeupScope, SessionStatus
+from sqlalchemy import Time
+from datetime import datetime, time as time_type
+
 
 
 # ============= Session Creation =============
@@ -215,49 +217,143 @@ class MakeupSessionResponse(BaseModel):
 
 # ============= Scheduled Events =============
 
+
+"""
+Fix occasion field validation in EventCreate schema
+Update in: app/schemas/makeup.py
+"""
+
+
+
+
 class EventCreate(BaseModel):
-    """Create scheduled event"""
-    event_name: str = Field(..., min_length=1, max_length=500)
+    """Schema for creating a new event - with proper occasion validation"""
+    event_name: str = Field(..., min_length=1, max_length=200)
     event_date: datetime
-    event_time: Optional[str] = None
-    occasion: OccasionType
+    event_time: Optional[Union[str, time_type]] = None
+    
+    # ✅ FIX: Use OccasionType enum, not free-text string
+    occasion: OccasionType  # ← Changed from str to OccasionType
+    
     outfit_description: Optional[str] = None
-    remind_1_day_before: bool = True
-    remind_2_hours_before: bool = True
+    remind_1_day_before: bool = False
+    remind_2_hours_before: bool = False
+    
+    @field_validator('event_time', mode='before')
+    @classmethod
+    def parse_time(cls, v):
+        """Parse time from multiple formats"""
+        if v is None:
+            return None
+        
+        if isinstance(v, time_type):
+            return v
+        
+        if isinstance(v, str):
+            v = v.strip()
+            
+            # 12-hour format
+            if 'AM' in v.upper() or 'PM' in v.upper():
+                try:
+                    v = ' '.join(v.split())
+                    try:
+                        return datetime.strptime(v, '%I:%M:%S %p').time()
+                    except ValueError:
+                        return datetime.strptime(v, '%I:%M %p').time()
+                except ValueError as e:
+                    raise ValueError(f"Invalid 12-hour time: {v}. Use '5:00 PM'")
+            
+            # 24-hour format
+            else:
+                try:
+                    return datetime.strptime(v, '%H:%M:%S').time()
+                except ValueError:
+                    try:
+                        return datetime.strptime(v, '%H:%M').time()
+                    except ValueError as e:
+                        raise ValueError(f"Invalid time: {v}. Use '17:00' or '5:00 PM'")
+        
+        return v
 
 
 class EventUpdate(BaseModel):
-    """Update scheduled event"""
-    event_name: Optional[str] = None
+    """Schema for updating an event"""
+    event_name: Optional[str] = Field(None, min_length=1, max_length=200)
     event_date: Optional[datetime] = None
-    event_time: Optional[str] = None
-    occasion: Optional[OccasionType] = None
+    event_time: Optional[Union[str, time_type]] = None
+    
+    # ✅ FIX: Use OccasionType enum, not free-text string
+    occasion: Optional[OccasionType] = None  # ← Changed from str to OccasionType
+    
     outfit_description: Optional[str] = None
     remind_1_day_before: Optional[bool] = None
     remind_2_hours_before: Optional[bool] = None
+    
+    @field_validator('event_time', mode='before')
+    @classmethod
+    def parse_time(cls, v):
+        """Parse time from multiple formats"""
+        if v is None:
+            return None
+        
+        if isinstance(v, time_type):
+            return v
+        
+        if isinstance(v, str):
+            v = v.strip()
+            
+            if 'AM' in v.upper() or 'PM' in v.upper():
+                try:
+                    v = ' '.join(v.split())
+                    try:
+                        return datetime.strptime(v, '%I:%M:%S %p').time()
+                    except ValueError:
+                        return datetime.strptime(v, '%I:%M %p').time()
+                except ValueError:
+                    raise ValueError(f"Invalid time: {v}")
+            else:
+                try:
+                    return datetime.strptime(v, '%H:%M:%S').time()
+                except ValueError:
+                    try:
+                        return datetime.strptime(v, '%H:%M').time()
+                    except ValueError:
+                        raise ValueError(f"Invalid time: {v}")
+        
+        return v
 
 
 class EventResponse(BaseModel):
-    """Scheduled event response"""
+    """Schema for event response"""
     id: int
     user_id: int
     event_name: str
     event_date: datetime
-    event_time: Optional[str]
-    occasion: OccasionType
-    outfit_description: Optional[str]
-    outfit_image_url: Optional[str]
-    remind_1_day_before: bool
-    remind_2_hours_before: bool
-    skincare_reminder_sent: bool
-    makeup_reminder_sent: bool
-    session_completed: bool
-    is_active: bool
-    created_at: datetime
+    event_time: Optional[time_type] = None
     
+    # ✅ FIX: Use OccasionType enum
+    occasion: OccasionType  # ← Changed from str to OccasionType
+    
+    outfit_description: Optional[str] = None
+    makeup_session_id: Optional[int] = None
+    
+    # Reminder settings
+    remind_1_day_before: bool = False
+    remind_2_hours_before: bool = False
+    skincare_reminder_sent: bool = False
+    makeup_reminder_sent: bool = False
+    
+    # Status
+    is_active: bool = True
+    is_cancelled: bool = False
+    session_completed: bool = False
+    
+    # Timestamps
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
     class Config:
         from_attributes = True
-
 
 # ============= History =============
 
